@@ -3,3 +3,5 @@ google-genai
 gspread
 openpyxl
 pandas
+requests
+ 
