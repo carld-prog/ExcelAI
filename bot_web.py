@@ -10,6 +10,8 @@ import streamlit as st
 from google import genai
 from google.genai import types
 
+from metricas import actualizar_youtube, lista_canales
+
 MODELO = "gemini-flash-lite-latest"  # si da problemas, prueba "gemini-flash-latest"
 
 # Pestañas que el bot crea automáticamente si no existen, con sus columnas
@@ -128,7 +130,23 @@ def crear_pestana(nombre: str, encabezados: list[str]) -> str:
         return f"Error: {e}"
 
 
-HERRAMIENTAS = [listar_pestanas, leer_pestana, escribir_celda, anadir_fila, borrar_fila, crear_pestana]
+def canales_youtube() -> list[str]:
+    return lista_canales(st.secrets.get("YOUTUBE_CANALES", "@curiobet"))
+
+
+def actualizar_metricas_youtube() -> str:
+    """Consulta YouTube y apunta en Métricas los suscriptores, las visualizaciones y el mejor
+    vídeo de la semana de cada canal configurado."""
+    try:
+        return actualizar_youtube(obtener_libro(), st.secrets["YOUTUBE_API_KEY"], canales_youtube())
+    except KeyError:
+        return "Falta YOUTUBE_API_KEY en los Secrets de Streamlit."
+    except Exception as e:
+        return f"Error: {e}"
+
+
+HERRAMIENTAS = [listar_pestanas, leer_pestana, escribir_celda, anadir_fila, borrar_fila,
+                crear_pestana, actualizar_metricas_youtube]
 
 INSTRUCCIONES = f"""Eres el asistente que organiza un pequeño negocio de dos socios: canales de
 YouTube y TikTok de curiosidades (el principal se llama CurioBet) cuyos ingresos servirán para
@@ -145,14 +163,20 @@ Reglas:
 - Al añadir filas, respeta el orden exacto de las columnas y deja vacío lo que no sepas.
 - Si no tienes claro en qué pestaña va algo, usa listar_pestanas o pregunta.
 - Para totales o resúmenes, lee la pestaña y calcula tú el resultado.
+- Si piden actualizar o consultar las métricas de YouTube, usa actualizar_metricas_youtube
+  (ya apunta la fila en Métricas; no la dupliques).
+- Si te envían una captura de estadísticas (TikTok, Instagram, YouTube Studio...), lee los
+  números y añade UNA fila en Métricas: fecha de hoy, canal, plataforma, seguidores,
+  visualizaciones, mejor vídeo y en Notas "Desde captura". Convierte abreviaturas a números
+  (1,2K = 1200; 3,4M = 3400000). Si un dato no aparece en la imagen, déjalo vacío; nunca lo inventes.
 - Responde en español, breve, confirmando qué has cambiado y en qué pestaña."""
 
 
-def enviar(texto: str) -> str:
-    """Manda el mensaje a la IA, con reintentos si Google está saturado."""
+def enviar(contenido) -> str:
+    """Manda el mensaje (texto, o lista de texto + imagen) a la IA, con reintentos."""
     for intento in range(1, 4):
         try:
-            return st.session_state.chat.send_message(texto).text or "Hecho."
+            return st.session_state.chat.send_message(contenido).text or "Hecho."
         except Exception as e:
             saturado = "503" in str(e) or "UNAVAILABLE" in str(e)
             if saturado and intento < 3:
@@ -181,6 +205,10 @@ if "chat" not in st.session_state:
         config=types.GenerateContentConfig(tools=HERRAMIENTAS, system_instruction=INSTRUCCIONES),
     )
     st.session_state.mensajes = []
+    st.session_state.captura_n = 0  # sirve para vaciar el subidor de capturas tras usarlo
+
+if aviso := st.session_state.pop("aviso", None):
+    st.success(aviso)
 
 # Barra lateral: selector de pestaña, tabla, resumen de finanzas y descarga
 with st.sidebar:
@@ -228,6 +256,36 @@ with st.sidebar:
         st.error("GCP_JSON no es válido: pega el .json completo, de { a }, entre ''' y '''.")
     except Exception as e:
         st.error(f"No puedo abrir la hoja ({type(e).__name__}): {e}")
+
+# Barra lateral: métricas automáticas
+with st.sidebar:
+    st.divider()
+    st.header("Métricas")
+
+    if st.button("🔄 Actualizar YouTube ahora", use_container_width=True):
+        with st.spinner("Consultando YouTube..."):
+            st.session_state.aviso = actualizar_metricas_youtube()
+        st.rerun()
+    st.caption("También se actualiza solo cada lunes por la mañana.")
+
+    with st.expander("📸 Subir captura de estadísticas"):
+        plataforma = st.selectbox("Plataforma", ["TikTok", "Instagram", "YouTube Studio", "Otra"])
+        canal = st.text_input("Canal", value="CurioBet")
+        captura = st.file_uploader("Captura", type=["png", "jpg", "jpeg", "webp"],
+                                   key=f"captura_{st.session_state.captura_n}")
+        if captura and st.button("Leer y apuntar", use_container_width=True):
+            contenido = [
+                types.Part.from_bytes(data=captura.getvalue(), mime_type=captura.type),
+                f"Captura de estadísticas de {plataforma} del canal {canal}. "
+                "Lee los datos y apúntalos en Métricas.",
+            ]
+            with st.spinner("Leyendo la captura..."):
+                respuesta = enviar(contenido)
+            st.session_state.mensajes.append(
+                {"rol": "user", "texto": f"📸 Captura de {plataforma} ({canal})"})
+            st.session_state.mensajes.append({"rol": "assistant", "texto": respuesta})
+            st.session_state.captura_n += 1
+            st.rerun()
 
 # Historial del chat
 for m in st.session_state.mensajes:
